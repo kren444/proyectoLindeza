@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lindeza - Tu Tienda de Maquillaje</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Pacifico&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body style="background: linear-gradient(120deg, #fff8f6 0%, #f9ebef 60%, #f2c4ce 100%);">
+
+    <header class="main-header">
+        <div class="container">
+            <div style="display:flex;align-items:center;gap:28px;">
+                <a href="#" class="logo-link">
+                    <img src="{{ url_for('static', filename='img/logo.png') }}" alt="Logo Lindeza" class="logo" style="max-height:140px;max-width:350px;object-fit:contain;">
+                </a>
+                <span class="lindeza-logo-text">Lindeza</span>
+            </div>
+            <nav class="main-nav">
+                <ul class="nav-list">
+                    <li><a href="#novedades">Novedades</a></li>
+                    <li><a href="#categorias">Labios</a></li>
+                    <li><a href="#categorias">Ojos</a></li>
+                    <li><a href="#categorias">Rostro</a></li>
+                    <li><a href="#" id="admin-link" class="hidden">Admin Panel</a></li>
+                </ul>
+            </nav>
+            <div class="header-icons">
+                <form id="search-form" class="search-form hidden">
+                    <input type="search" placeholder="Buscar productos..." id="search-input" aria-label="Campo de búsqueda">
+                </form>
+                <a href="#" id="search-icon" aria-label="Buscar"><i class="fas fa-search"></i></a>
+                <div id="auth-links">
+                    <a href="#" id="login-icon" aria-label="Mi cuenta"><i class="fas fa-user"></i></a>
+                </div>
+                <div id="user-info" class="hidden">
+                    <span id="welcome-msg"></span>
+                    <a href="#" id="logout-btn">Cerrar Sesión</a>
+                </div>
+                <a href="#" id="cart-icon" aria-label="Carrito de compras">
+                    <i class="fas fa-shopping-bag"></i>
+                    <span id="cart-count">0</span>
+                </a>
+                <button class="hamburger" id="hamburger" aria-label="Abrir menú">
+                    <i class="fas fa-bars"></i>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main>
+
+        <section class="hero hero-side-image">
+            <div class="hero-img-container" style="position:relative;display:flex;align-items:center;justify-content:center;">
+                <img src="{{ url_for('static', filename='img/CARRU.png') }}" alt="Imagen principal" class="hero-img hero-img-large">
+                <a href="#novedades" class="btn btn-primary hero-img-btn" style="position:absolute;left:50%;top:75%;transform:translate(-50%,-50%);font-size:1.1rem;padding:12px 32px;box-shadow:0 4px 18px #d9669022;">Comprar ahora</a>
+            </div>
+        </section>
+
+        <section class="shop-by-category" id="categorias">
+            <div class="container">
+                <h2>Selecciona una categoría</h2>
+                <div class="category-grid">
+                    <a href="#" class="category-card">
+                        <img src="{{ url_for('static', filename='img/LABIOS.jpg') }}" alt="Labios" style="width:240px;height:240px;object-fit:cover;border-radius:50%;box-shadow:0 2px 12px #d9669022;border:3px solid #f2c4ce;">
+                        <div class="category-title">Labios</div>
+                    </a>
+                    <a href="#" class="category-card">
+                        <img src="{{ url_for('static', filename='img/OJO.jpg') }}" alt="Ojos" style="width:240px;height:240px;object-fit:cover;border-radius:50%;box-shadow:0 2px 12px #d9669022;border:3px solid #f2c4ce;">
+                        <div class="category-title">Ojos</div>
+                    </a>
+                    <a href="#" class="category-card">
+                        <img src="{{ url_for('static', filename='img/rostro.jpg') }}" alt="Rostro" style="width:240px;height:240px;object-fit:cover;border-radius:50%;box-shadow:0 2px 12px #d9669022;border:3px solid #f2c4ce;">
+                        <div class="category-title">Rostro</div>
+                    </a>
+                </div>
+            </div>
+        </section>
+
+        <section class="featured-products" id="novedades">
+            <div class="container">
+                <h2>Productos Destacados</h2>
+                <div class="product-gallery-horizontal">
+                    {% for producto in productos %}
+                    <div class="product-gallery-card" data-id="{{ producto.id }}" data-categoria="{{ producto.categoria }}">
+                        <img src="{{ url_for('static', filename=producto.imagen) }}" alt="{{ producto.nombre }}" class="product-gallery-img">
+                        <div class="product-gallery-title">{{ producto.nombre }}</div>
+                        <div class="product-gallery-desc">{{ producto.descripcion }}</div>
+                        <div class="product-gallery-price">{{ producto.precio }}</div>
+                        <div class="product-gallery-actions">
+                            <button class="btn btn-secondary view-details" data-id="{{ producto.id }}">Ver detalles</button>
+                            <button class="btn btn-primary add-to-cart" data-id="{{ producto.id }}">Agregar al carrito</button>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </section>
+
+
+        
+        
+    </main>
+
+    <footer class="main-footer">
+        <div class="container">
+            <div class="footer-grid">
+                <div class="footer-column">
+                    
+                    <div class="footer-grid" style="display:flex;flex-direction:row;gap:32px;justify-content:center;align-items:flex-start;flex-wrap:wrap;">
+                        <div class="footer-column" style="min-width:220px;max-width:320px;flex:1;">
+                            <h4>Lindeza</h4>
+                            <p>Belleza y Vanidad.</p>
+                            <div class="social-icons">
+                                <a href="https://instagram.com/By.Lindeza" target="_blank"><i class="fab fa-instagram"></i> By.Lindeza</a>
+                                <a href="https://wa.me/573018814955" target="_blank"><i class="fab fa-whatsapp"></i> Tienda Lindeza</a>
+                            </div>
+                        </div>
+                        <div class="footer-column" style="min-width:220px;max-width:420px;flex:2;">
+                            <h4 style="margin-bottom:0.7rem;">🌸 Sobre Nosotros</h4>
+                            <div style="font-size:1.05rem;line-height:1.7;">
+                                <p>En Lindeza creemos que la verdadera belleza nace de la confianza y el cuidado personal.</p>
+                                <button id="info-toggle" style="margin:10px 0;padding:8px 18px;border-radius:8px;background:#d96690;color:#fff;border:none;cursor:pointer;font-weight:600;">Leer más</button>
+                                <div id="info-panel" style="display:none;margin-top:10px;background:#fff8f6;border-radius:10px;padding:16px 18px;border:1px solid #f2c4ce;">
+                                    <p>Somos una marca apasionada por el mundo del maquillaje y la cosmética, dedicada a ofrecer productos de calidad que realzan lo mejor de ti.<br>
+                                    Nuestro objetivo es acompañarte en cada momento especial, brindándote colores, texturas y estilos que expresen tu esencia única.<br>
+                                    Más que una tienda, somos un espacio para soñar, crear y brillar con tu propia luz.<br>
+                                    En Lindeza no vendemos solo maquillaje, compartimos experiencias que hacen que cada día te sientas única, radiante y especial.</p>
+                                    <hr>
+                                    <p><span style="font-size:1.2rem;">🌷 <b>MISIÓN:</b></span> Inspirar a cada persona a descubrir y potenciar su belleza con productos accesibles, modernos y de excelente calidad.</p>
+                                    <p><span style="font-size:1.2rem;">💎 <b>VISIÓN:</b></span> Convertirnos en una marca reconocida por resaltar la autenticidad y confianza de nuestros clientes.</p>
+                                    <p><span style="font-size:1.2rem;">🤍 <b>VALORES:</b></span> Pasión, confianza, autenticidad y compromiso contigo.</p>
+                                </div>
+                                <script>
+                                document.addEventListener('DOMContentLoaded', function() {
+                                    var btn = document.getElementById('info-toggle');
+                                    var panel = document.getElementById('info-panel');
+                                    btn.addEventListener('click', function() {
+                                        if(panel.style.display === 'none') {
+                                            panel.style.display = 'block';
+                                            btn.textContent = 'Ocultar información';
+                                        } else {
+                                            panel.style.display = 'none';
+                                            btn.textContent = 'Leer más';
+                                        }
+                                    });
+                                });
+                                </script>
+                            </div>
+                        </div>
+                        <div class="footer-column" style="min-width:220px;max-width:320px;flex:1;">
+                            <h4 style="margin-bottom:0.7rem;color:#d96690;">Ubicación y Contacto</h4>
+                            <p><strong>Dirección:</strong> Cra 3 #10-93, Vélez, Santander</p>
+                            <p><strong>Horario:</strong> Lunes a Sábado 9am - 7pm <br> Domingo Y Festivo 10am - 1pm
+                            </p>
+                            <div style="margin-top:1.2rem;">
+                                <h5 style="font-size:1rem;margin-bottom:0.5rem;color:#d96690;">Mapa de Ubicación</h5>
+                                <iframe src="https://www.google.com/maps?q=Cra+3+%2310-93,+Vélez,+Santander&output=embed" width="100%" height="120" style="border-radius:10px;border:1px solid #eee;"></iframe>
+                            </div>
+                        </div>
+                    </div>
+                    </div>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>&copy; 2025 Lindeza . Todos los derechos reservados.</p>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Login Modal -->
+    <div id="login-modal" class="modal-overlay hidden">
+        <div class="modal-content">
+            <button class="close-modal">&times;</button>
+            <h2>Iniciar Sesión</h2>
+            <form id="login-form">
+                <input type="email" id="login-email" placeholder="Correo electrónico" required>
+                <input type="password" id="login-password" placeholder="Contraseña" required>
+                <button type="submit" class="btn btn-primary">Entrar</button>
+                <p id="login-error" class="error-message hidden"></p>
+                <p class="switch-form-link">¿No tienes cuenta? <a href="#" id="show-register">Regístrate</a></p>
+            </form>
+            <div id="register-form-container" class="hidden">
+                <h2>Crear Cuenta</h2>
+                <form id="register-form">
+                    <input type="text" id="register-name" placeholder="Nombre" required>
+                    <input type="email" id="register-email" placeholder="Correo electrónico" required>
+                    <input type="password" id="register-password" placeholder="Contraseña" required>
+                    <div class="form-group">
+                        <label for="register-role" style="font-weight:600;margin-bottom:0.5rem;display:block;">Selecciona tu rol:</label>
+                        <select id="register-role" required style="width:100%;padding:10px;border-radius:8px;border:1px solid #ddd;font-size:1rem;">
+                            <option value="usuario" selected>Cliente</option>
+                            <option value="admin">Administrador</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Registrarse</button>
+                    <p id="register-error" class="error-message hidden"></p>
+                    <p class="switch-form-link">¿Ya tienes cuenta? <a href="#" id="show-login">Inicia sesión</a></p>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cart Sidebar -->
+    <div id="cart-sidebar" class="cart-overlay hidden">
+        <div class="cart-content">
+            <div class="cart-header">
+                <h2>Tu Carrito</h2>
+                <button id="close-cart" class="close-modal">&times;</button>
+            </div>
+            <div id="cart-items">
+                <!-- Cart items will be injected here by JS -->
+            </div>
+            <div class="cart-footer">
+                <div class="cart-total">
+                    <span>Subtotal:</span>
+                    <span id="cart-subtotal">$0.00</span>
+                </div>
+                <button class="btn btn-primary btn-checkout">Finalizar Compra</button>
+            </div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+    <!-- Botón flotante WhatsApp -->
+    <a href="https://wa.me/573018814955?text=¡Hola! 👋 Quiero hacer un pedido de maquillaje 💄✨ ¿Me puedes ayudar?" class="whatsapp-float" target="_blank" aria-label="Chat WhatsApp">
+        <i class="fab fa-whatsapp"></i>
+    </a>
+</body>
+</html>

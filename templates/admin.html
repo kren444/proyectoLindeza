@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Panel de Administrador - Lindeza</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Poppins', sans-serif;
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+        }
+        
+        .admin-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        .admin-header {
+            background: white;
+            padding: 2rem;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            margin-bottom: 2rem;
+            text-align: center;
+        }
+        
+        .admin-header h1 {
+            color: #333;
+            margin: 0 0 0.5rem 0;
+            font-size: 2.5rem;
+            font-weight: 700;
+        }
+        
+        .admin-header p {
+            color: #666;
+            font-size: 1.1rem;
+            margin: 0;
+        }
+        
+        .welcome-msg {
+            color: #d96690;
+            font-weight: 600;
+            font-size: 1.3rem;
+            margin-bottom: 1rem;
+        }
+        
+        .admin-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+        
+        .admin-card {
+            background: white;
+            padding: 2rem;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            text-align: center;
+            transition: transform 0.3s ease;
+        }
+        
+        .admin-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .admin-card i {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: #d96690;
+        }
+        
+        .admin-card h3 {
+            color: #333;
+            margin-bottom: 1rem;
+            font-size: 1.5rem;
+        }
+        
+        .admin-card p {
+            color: #666;
+            margin-bottom: 1.5rem;
+            line-height: 1.6;
+        }
+        
+        .btn {
+            display: inline-block;
+            padding: 0.75rem 2rem;
+            background: #d96690;
+            color: white;
+            text-decoration: none;
+            border-radius: 25px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            border: none;
+            cursor: pointer;
+        }
+        
+        .btn:hover {
+            background: #c5577a;
+            transform: translateY(-2px);
+        }
+        
+        .btn-danger {
+            background: #e74c3c;
+        }
+        
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.5rem;
+            margin: 2rem 0;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1.5rem;
+            border-radius: 10px;
+            text-align: center;
+        }
+        
+        .stat-number {
+            font-size: 2.5rem;
+            font-weight: 700;
+            display: block;
+        }
+        
+        .stat-label {
+            font-size: 0.9rem;
+            opacity: 0.9;
+        }
+        
+        .footer-admin {
+            text-align: center;
+            padding: 2rem;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            margin-top: 2rem;
+        }
+        
+        @media (max-width: 768px) {
+            .admin-container {
+                padding: 1rem;
+            }
+            
+            .admin-header h1 {
+                font-size: 2rem;
+            }
+            
+            .admin-cards {
+                grid-template-columns: 1fr;
+            }
+            
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="admin-container">
+        <div class="admin-header">
+            <div class="welcome-msg">👋 Bienvenido, {{ user.name }}</div>
+            <h1>Panel de Administrador</h1>
+            <p>Gestiona tu tienda de maquillaje desde aquí</p>
+        </div>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <span class="stat-number">50</span>
+                <span class="stat-label">Productos</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-number">1,234</span>
+                <span class="stat-label">Usuarios</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-number">89</span>
+                <span class="stat-label">Pedidos Hoy</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-number">$45,678</span>
+                <span class="stat-label">Ventas del Mes</span>
+            </div>
+        </div>
+        
+        <div class="admin-cards">
+            <div class="admin-card">
+                <i class="fas fa-box"></i>
+                <h3>Gestionar Productos</h3>
+                <p>Añade, edita o elimina productos de tu catálogo. Gestiona inventario y precios.</p>
+                <a href="#" class="btn">Ver Productos</a>
+            </div>
+            
+            <div class="admin-card">
+                <i class="fas fa-users"></i>
+                <h3>Gestionar Usuarios</h3>
+                <p>Administra las cuentas de usuarios, permisos y roles en el sistema.</p>
+                <a href="#" class="btn">Ver Usuarios</a>
+            </div>
+            
+            <div class="admin-card">
+                <i class="fas fa-shopping-cart"></i>
+                <h3>Pedidos</h3>
+                <p>Revisa y gestiona todos los pedidos realizados por los clientes.</p>
+                <a href="#" class="btn">Ver Pedidos</a>
+            </div>
+            
+            <div class="admin-card">
+                <i class="fas fa-chart-bar"></i>
+                <h3>Reportes</h3>
+                <p>Analiza las ventas, productos más vendidos y estadísticas generales.</p>
+                <a href="#" class="btn">Ver Reportes</a>
+            </div>
+            
+            <div class="admin-card">
+                <i class="fas fa-cog"></i>
+                <h3>Configuración</h3>
+                <p>Ajusta la configuración general de la tienda y personalización.</p>
+                <a href="#" class="btn">Configurar</a>
+            </div>
+            
+            <div class="admin-card">
+                <i class="fas fa-palette"></i>
+                <h3>Diseño de Tienda</h3>
+                <p>Personaliza el aspecto visual y la experiencia de usuario de la tienda.</p>
+                <a href="#" class="btn">Personalizar</a>
+            </div>
+        </div>
+        
+        <div class="footer-admin">
+            <p>
+                <a href="/" class="btn" style="margin-right: 1rem;">
+                    <i class="fas fa-home"></i> Volver a la Tienda
+                </a>
+                <a href="/api/logout" class="btn btn-danger" id="logout-btn">
+                    <i class="fas fa-sign-out-alt"></i> Cerrar Sesión
+                </a>
+            </p>
+            <p style="margin-top: 1rem; color: #666; font-size: 0.9rem;">
+                © 2025 Lindeza - Panel de Administración
+            </p>
+        </div>
+    </div>
+
+    <script>
+        // Manejar logout
+        document.getElementById('logout-btn').addEventListener('click', async function(e) {
+            e.preventDefault();
+            
+            try {
+                const response = await fetch('/api/logout', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (response.ok) {
+                    window.location.href = '/';
+                } else {
+                    alert('Error al cerrar sesión');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                // Fallback: redirigir de todas formas
+                window.location.href = '/';
+            }
+        });
+    </script>
+</body>
+</html>
