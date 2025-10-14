@@ -195,7 +195,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const name = document.getElementById('register-name').value;
             const email = document.getElementById('register-email').value;
             const password = document.getElementById('register-password').value;
-            const { user } = await api('/api/register', { method: 'POST', body: JSON.stringify({ name, email, password }) });
+            // read role and normalize to 'user' or 'admin'
+            let role = document.getElementById('register-role')?.value || 'user';
+            if (role === 'usuario') role = 'user';
+            const { user } = await api('/api/register', { method: 'POST', body: JSON.stringify({ name, email, password, role }) });
             updateUIForUser(user);
             closeModal();
             registerError.classList.add('hidden');
@@ -244,6 +247,14 @@ document.addEventListener('DOMContentLoaded', () => {
             updateUIForUser(user);
         } catch {}
     })();
+
+    // If products are updated in admin, reload the page to show new products
+    window.addEventListener('storage', (e) => {
+        if (e.key === 'products_updated') {
+            // small delay to allow DB commit propagation
+            setTimeout(() => location.reload(), 300);
+        }
+    });
 
     // --- Cart Logic (Session-backed) ---
     const cartIcon = document.getElementById('cart-icon');
