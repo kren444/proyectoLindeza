@@ -1,14 +1,25 @@
 from flask import Flask, render_template, jsonify, request, session # type: ignore
+import config
 from datetime import timedelta, datetime
 import random
 import os
 import pymysql
 import sqlite3
 from werkzeug.security import check_password_hash, generate_password_hash
+import traceback
 try:
     from passlib.hash import scrypt as passlib_scrypt
 except Exception:
     passlib_scrypt = None
+try:
+    import qrcode
+    from io import BytesIO
+    import base64
+except Exception:
+    qrcode = None
+import smtplib
+from email.message import EmailMessage
+from email.utils import formataddr
 
 app = Flask(__name__)
 app.secret_key = "change-this-secret-key"
@@ -22,19 +33,44 @@ def get_mysql_conn():
       2) Local default: host=localhost, user=root, password='' , db='lindeza'
     Returns a connection or None if cannot connect.
     """
-    mysql_host = os.environ.get('MYSQL_HOST')
-    mysql_user = os.environ.get('MYSQL_USER')
-    mysql_password = os.environ.get('MYSQL_PASSWORD')
-    mysql_db = os.environ.get('MYSQL_DB')
+    # prefer explicit config.py values, fallback to environment variables
+    mysql_host = getattr(config, 'MYSQL_HOST', None) or os.environ.get('MYSQL_HOST')
+    mysql_port = getattr(config, 'MYSQL_PORT', None) or os.environ.get('MYSQL_PORT')
+    mysql_user = getattr(config, 'MYSQL_USER', None) or os.environ.get('MYSQL_USER')
+    mysql_password = getattr(config, 'MYSQL_PASSWORD', None) or os.environ.get('MYSQL_PASSWORD')
+    mysql_db = getattr(config, 'MYSQL_DB', None) or os.environ.get('MYSQL_DB')
+
+    # Normalize host:port if provided in MYSQL_HOST
+    host = None; port = None
+    if mysql_host:
+        if ':' in mysql_host:
+            try:
+                host_part, port_part = mysql_host.split(':', 1)
+                host = host_part.strip()
+                port = int(port_part)
+            except Exception:
+                host = mysql_host.strip()
+        else:
+            host = mysql_host.strip()
+    if mysql_port and not port:
+        try:
+            port = int(mysql_port)
+        except Exception:
+            port = None
 
     # Try env vars first (require host,user,db)
-    if mysql_host and mysql_user and mysql_db:
+    if host and mysql_user and mysql_db:
         try:
-            return pymysql.connect(host=mysql_host, user=mysql_user, password=mysql_password or '', db=mysql_db, cursorclass=pymysql.cursors.DictCursor)
+            conn_args = dict(host=host, user=mysql_user, password=mysql_password or '', db=mysql_db, cursorclass=pymysql.cursors.DictCursor)
+            if port:
+                conn_args['port'] = port
+            return pymysql.connect(**conn_args)
         except Exception:
             pass
 
-    # Fallback to common local defaults used by many phpMyAdmin installs
+    # No remote defaults here — fall back to local defaults if explicit config/env not provided
+
+    # Fallback: try common local defaults
     try:
         return pymysql.connect(host='localhost', user='root', password='', db='lindeza', cursorclass=pymysql.cursors.DictCursor)
     except Exception:
@@ -65,6 +101,268 @@ def get_metrics_conn():
     except Exception:
         pass
     return conn
+
+
+def init_orders_table():
+    conn = get_metrics_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_email TEXT,
+                payment_method TEXT,
+                amount INTEGER,
+                items TEXT,
+                reference TEXT,
+                phone TEXT,
+                address TEXT,
+                card_last4 TEXT,
+                status TEXT,
+                created_at DATETIME
+            )
+        ''')
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+# Ensure uploads dir exists
+UPLOADS_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+
+
+@app.route('/uploads/<path:filename>')
+def serve_upload(filename):
+    from flask import send_from_directory
+    return send_from_directory(UPLOADS_DIR, filename)
+
+
+@app.route('/api/orders/<int:oid>/upload_proof', methods=['POST'])
+def api_upload_proof(oid):
+    # allow both user and admin to upload proof (but require auth)
+    user = session.get('user')
+    if not user:
+        return jsonify({'error':'forbidden'}), 403
+    if 'file' not in request.files:
+        return jsonify({'error': 'no file uploaded'}), 400
+    f = request.files['file']
+    if not f.filename:
+        return jsonify({'error': 'invalid file'}), 400
+    # validate extension
+    allowed_ext = ['.png','.jpg','.jpeg','.pdf']
+    fn = f.filename
+    _, ext = os.path.splitext(fn.lower())
+    if ext not in allowed_ext:
+        return jsonify({'error': 'tipo de archivo no permitido'}), 400
+    # save file with safe name
+    safe_name = f"order_{oid}_{int(datetime.utcnow().timestamp())}{ext}"
+    dest = os.path.join(UPLOADS_DIR, safe_name)
+    try:
+        f.save(dest)
+        # update order record
+        conn = get_metrics_conn()
+        cur = conn.cursor()
+        cur.execute('UPDATE orders SET status=?, created_at=created_at WHERE id=?', ('pending', oid))
+        # add proof_path column if missing (attempt)
+        try:
+            cur.execute('PRAGMA table_info(orders)')
+            cols = [r[1] for r in cur.fetchall()]
+            if 'proof_path' not in cols:
+                cur.execute('ALTER TABLE orders ADD COLUMN proof_path TEXT')
+        except Exception:
+            pass
+        try:
+            cur.execute('UPDATE orders SET proof_path=? WHERE id=?', (safe_name, oid))
+            conn.commit()
+        except Exception:
+            pass
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+        # notify admin with attachment if small
+        try:
+            att = None
+            path = dest
+            if os.path.exists(path) and os.path.getsize(path) < 5 * 1024 * 1024:
+                with open(path, 'rb') as fh:
+                    data = fh.read()
+                mimetype = 'application/octet-stream'
+                if ext in ('.png', '.jpg', '.jpeg'):
+                    mimetype = 'image/png' if ext=='.png' else 'image/jpeg'
+                elif ext == '.pdf':
+                    mimetype = 'application/pdf'
+                send_email(f'Nuevo comprobante pedido #{oid}', f'Comprobante subido para pedido {oid}', attachments=[(safe_name, data, mimetype)])
+        except Exception:
+            pass
+        return jsonify({'ok': True, 'file': safe_name, 'url': f"/uploads/{safe_name}"})
+    except Exception as e:
+        return jsonify({'error': 'save failed', 'detail': str(e)}), 500
+
+
+@app.route('/api/admin/orders/<int:oid>')
+def api_admin_order_detail(oid):
+    user = session.get('user')
+    if not user or user.get('role') != 'admin':
+        return jsonify({'error':'forbidden'}), 403
+    try:
+        conn = get_metrics_conn()
+        cur = conn.cursor()
+        cur.execute('SELECT id, user_email, payment_method, amount, items, reference, phone, address, card_last4, proof_path, status, created_at FROM orders WHERE id=?', (oid,))
+        r = cur.fetchone()
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+        if not r:
+            return jsonify({'error':'not found'}), 404
+        return jsonify({ 'id': r[0], 'user_email': r[1], 'payment_method': r[2], 'amount': r[3], 'items': r[4], 'reference': r[5], 'phone': r[6], 'address': r[7], 'card_last4': r[8], 'proof_path': r[9], 'status': r[10], 'created_at': r[11] })
+    except Exception as e:
+        return jsonify({'error':'failed','detail': str(e)}), 500
+
+
+def create_order_in_db(user_email, payment_method, amount, items, reference, phone=None, address=None, card_last4=None):
+    conn = get_metrics_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute('INSERT INTO orders (user_email,payment_method,amount,items,reference,phone,address,card_last4,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                    (user_email, payment_method, amount, items, reference, phone, address, card_last4, 'pending', datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')))
+        conn.commit()
+        oid = cur.lastrowid
+        return oid
+    except Exception:
+        return None
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def generate_qr_base64(payload_text):
+    # returns base64-encoded PNG data URI or None if qrcode not available
+    if qrcode is None:
+        return None
+    try:
+        img = qrcode.make(payload_text)
+        buf = BytesIO()
+        img.save(buf, format='PNG')
+        b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+        return 'data:image/png;base64,' + b64
+    except Exception:
+        return None
+
+
+def send_email(subject, body, to_addr=None, attachments=None):
+    # attachments: list of (filename, bytes, mimetype)
+    smtp_host = getattr(config, 'SMTP_HOST', '') or os.environ.get('SMTP_HOST','')
+    smtp_port = getattr(config, 'SMTP_PORT', 587) or int(os.environ.get('SMTP_PORT', 587))
+    smtp_user = getattr(config, 'SMTP_USER', '') or os.environ.get('SMTP_USER','')
+    smtp_pass = getattr(config, 'SMTP_PASSWORD', '') or os.environ.get('SMTP_PASSWORD','')
+    use_tls = getattr(config, 'SMTP_USE_TLS', True)
+    from_addr = getattr(config, 'EMAIL_FROM', 'no-reply@localhost')
+    admin_to = to_addr or getattr(config, 'ADMIN_EMAIL', os.environ.get('ADMIN_EMAIL',''))
+    if not smtp_host or not admin_to:
+        # SMTP not configured; skip sending
+        print('send_email skipped: no smtp_host or admin email configured')
+        return False
+    try:
+        msg = EmailMessage()
+        msg['Subject'] = subject
+        msg['From'] = formataddr(('Lindeza', from_addr))
+        msg['To'] = admin_to
+        msg.set_content(body)
+        if attachments:
+            for fname, data, mimetype in attachments:
+                maintype, subtype = mimetype.split('/',1) if '/' in mimetype else ('application','octet-stream')
+                msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=fname)
+        # connect
+        if use_tls:
+            server = smtplib.SMTP(smtp_host, smtp_port, timeout=10)
+            server.starttls()
+        else:
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10)
+        if smtp_user:
+            server.login(smtp_user, smtp_pass)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        print('send_email failed:', e)
+        return False
+
+
+def try_mysql_connect_debug():
+    """Try several connection candidates and return (conn, error_message, used_params).
+    conn is a live pymysql connection on success (caller should close it), or None on failure.
+    error_message is None on success or a string describing last exception.
+    used_params gives host/port/user/db attempted (no passwords returned).
+    """
+    mysql_host = os.environ.get('MYSQL_HOST')
+    mysql_port = os.environ.get('MYSQL_PORT')
+    mysql_user = os.environ.get('MYSQL_USER')
+    mysql_password = os.environ.get('MYSQL_PASSWORD')
+    mysql_db = os.environ.get('MYSQL_DB')
+
+    candidates = []
+    # If explicit env vars, try them first
+    if mysql_host and mysql_user and mysql_db:
+        # allow host:port
+        host = mysql_host
+        port = None
+        if ':' in mysql_host:
+            try:
+                h, p = mysql_host.split(':', 1)
+                host = h.strip(); port = int(p)
+            except Exception:
+                host = mysql_host
+        elif mysql_port:
+            try:
+                port = int(mysql_port)
+            except Exception:
+                port = None
+        candidates.append({'host': host, 'port': port, 'user': mysql_user, 'db': mysql_db})
+
+    # try remote isladigital as shown in screenshot
+    candidates.append({'host': os.environ.get('MYSQL_HOST','isladigital.xyz'), 'port': int(os.environ.get('MYSQL_PORT','3311')), 'user': os.environ.get('MYSQL_USER','f58_karen'), 'db': os.environ.get('MYSQL_DB','f58_karen')})
+    # try local
+    candidates.append({'host': 'localhost', 'port': None, 'user': 'root', 'db': 'lindeza'})
+
+    last_err = None
+    for c in candidates:
+        try:
+            conn_args = dict(host=c['host'], user=c['user'], db=c['db'], cursorclass=pymysql.cursors.DictCursor)
+            if c.get('port'):
+                conn_args['port'] = int(c['port'])
+            pwd = mysql_password or ''
+            conn = pymysql.connect(password=pwd, **conn_args)
+            return conn, None, {'host': c['host'], 'port': c.get('port'), 'user': c['user'], 'db': c['db']}
+        except Exception as e:
+            last_err = str(e)
+            continue
+    return None, (last_err or 'unknown error'), {}
 
 
 def record_visit(email, role, event, product_id=None):
@@ -109,31 +407,78 @@ def cart_summary(cart):
     items = []
     subtotal = 0.0
     total_qty = 0
+    # common image list used for generated-product fallbacks and name/image fallbacks
+    img_files = [
+        'BASE MEDIA COBERTURA.jpg','BASE QUEEN.webp','BASE TRENDY.webp','BASE.jpg','BB CREAM.jpg','BRONZER.jpg','CONTORNO TRENDY.webp','CORRECOTR TRENDY.webp','CORRECTOR BLOM.png','CORRECTOR MAGIC.webp','CORRECTOR OJERA.webp','CORRECTOR VITAMINA E.jpg','CORRECTOR.jpg','DELINEADOR COLOR.webp','DELINEADOR LIQUIDO.jpg','DELINEADOR PLUMON.webp','DELINEADOR PROFESIONAL.webp','DELINEADOR.jpg','FIJADOR TRENDY CEJAS.webp','GEL 2 EN 1 CEJAS.jpg','GEL FIJADPR CEJAS.webp','ILIMINADOR POLVO.jpg','ILUMINADOR CREMA.jpg','ILUMINADOR LIQUI TRENDY.webp','ILIMINADOR LIQUIDO.jpg','ILUMINADOR TRENDY.webp','KIT LIP GLOSS.webp','LIP GLOSS ATENEA.webp','LIP GLOSS MYK.webp','LIP GLOSS TREND.webp','LIP GLOSS TRENDY.webp','PALETA CONTORNOS.jpg','PALETA SOMBRAS.jpg','PALETA.jpg','PESTAÑA SERENITY.jpg','PESTAÑINA LASH.jpg','PESTAÑINA PROSA.webp','PESTAÑINA.jpg','RUBOR CREMA.jpg','RUBOR LIQUID.jpg','RUBOR POLVO.jpg','RUBOR PRIMAVERA.webp','RUBOR STAR.webp','SOMBR SAFARI.webp','SOMBRA CHOCOLATE.webp','SOMBRAS BLOSSOM.webp','TINTA BLOOM.png','TINTA ESCARCHA.webp','TINTA.jpg','TINTA.png'
+    ]
     for pid, qty in cart.items():
-        # Buscar en la lista de productos generados dinámicamente
+        # First try to read the product price from the DB (if available)
+        precio_val = None
+        imagen = ''
+        nombre = ''
         try:
-            idx = int(pid) - 1
-        except:
-            continue
-        # Usar los datos de productos generados en index()
-        img_files = [
+            conn = get_mysql_conn()
+            if conn:
+                try:
+                    cur = conn.cursor(pymysql.cursors.DictCursor)
+                    # probe common product tables
+                    tried = ['producto', 'productos', 'productos_catalogo', 'items']
+                    row = None
+                    for t in tried:
+                        try:
+                            cur.execute(f"SELECT * FROM {t} WHERE id=%s LIMIT 1", (pid,))
+                            rows = cur.fetchall()
+                            if rows:
+                                row = rows[0]
+                                break
+                        except Exception:
+                            row = None
+                    if row:
+                        imagen = row.get('imagen') or row.get('image') or ''
+                        nombre = (row.get('nombre') or row.get('name') or '')
+                        precio_val = row.get('precio') if row.get('precio') is not None else row.get('price')
+                    try:
+                        cur.close()
+                    except Exception:
+                        pass
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+        except Exception:
+            precio_val = None
+
+        # Fallback: use generated products/prices if DB lookup failed
+        if precio_val is None:
+            try:
+                idx = int(pid) - 1
+            except:
+                continue
+            # Usar los datos de productos generados en index()
+            img_files = [
             'BASE MEDIA COBERTURA.jpg','BASE QUEEN.webp','BASE TRENDY.webp','BASE.jpg','BB CREAM.jpg','BRONZER.jpg','CONTORNO TRENDY.webp','CORRECOTR TRENDY.webp','CORRECTOR BLOM.png','CORRECTOR MAGIC.webp','CORRECTOR OJERA.webp','CORRECTOR VITAMINA E.jpg','CORRECTOR.jpg','DELINEADOR COLOR.webp','DELINEADOR LIQUIDO.jpg','DELINEADOR PLUMON.webp','DELINEADOR PROFESIONAL.webp','DELINEADOR.jpg','FIJADOR TRENDY CEJAS.webp','GEL 2 EN 1 CEJAS.jpg','GEL FIJADPR CEJAS.webp','ILIMINADOR POLVO.jpg','ILUMINADOR CREMA.jpg','ILUMINADOR LIQUI TRENDY.webp','ILUMINADOR LIQUIDO.jpg','ILUMINADOR TRENDY.webp','KIT LIP GLOSS.webp','LIP GLOSS ATENEA.webp','LIP GLOSS MYK.webp','LIP GLOSS TREND.webp','LIP GLOSS TRENDY.webp','PALETA CONTORNOS.jpg','PALETA SOMBRAS.jpg','PALETA.jpg','PESTAÑA SERENITY.jpg','PESTAÑINA LASH.jpg','PESTAÑINA PROSA.webp','PESTAÑINA.jpg','RUBOR CREMA.jpg','RUBOR LIQUID.jpg','RUBOR POLVO.jpg','RUBOR PRIMAVERA.webp','RUBOR STAR.webp','SOMBR SAFARI.webp','SOMBRA CHOCOLATE.webp','SOMBRAS BLOSSOM.webp','TINTA BLOOM.png','TINTA ESCARCHA.webp','TINTA.jpg','TINTA.png'
         ]
-        if idx < 0 or idx >= len(img_files):
-            continue
-        nombre = img_files[idx].rsplit('.',1)[0].replace('_',' ').replace('-',' ')
-        # Usar la lista de precios reales
-        precios_reales = [28000,15000,26000,35000,22000,22000,19500,21900,24800,13900,16300,24000,18900,14000,10000,21000,26900,10500,13500,12000,18000,14600,21900,19500,13900,16000,28000,42000,15000,15900,13600,21900,26000,23400,18500,19000,22000,21000,21900,12600,13000,16700,24000,24900,27000,23000,18000,17900,10000,18000]
-        precio = precios_reales[idx] if idx < len(precios_reales) else 20000
-        imagen = 'img/' + img_files[idx]
+            if idx < 0 or idx >= len(img_files):
+                continue
+            nombre = img_files[idx].rsplit('.',1)[0].replace('_',' ').replace('-',' ')
+            precios_reales = [28000,15000,26000,35000,22000,22000,19500,21900,24800,13900,16300,24000,18900,14000,10000,21000,26900,10500,13500,12000,18000,14600,21900,19500,13900,16000,28000,42000,15000,15900,13600,21900,26000,23400,18500,19000,22000,21000,21900,12600,13000,16700,24000,24900,27000,23000,18000,17900,10000,18000]
+            precio = precios_reales[idx] if idx < len(precios_reales) else 20000
+            imagen = 'img/' + img_files[idx]
+        else:
+            # we have precio_val, nombre, imagen from DB row
+            try:
+                precio = int(float(precio_val))
+            except Exception:
+                precio = 0
         line_total = precio * qty
         subtotal += line_total
         total_qty += qty
         items.append({
-            "id": str(idx+1),
-            "name": nombre,
+            "id": str(pid),
+            "name": nombre or (img_files[int(pid)-1].rsplit('.',1)[0].replace('_',' ').replace('-',' ') if pid.isdigit() and int(pid)-1 < len(img_files) else ''),
             "price": f"${precio:,.0f}",
-            "image": imagen,
+            "image": imagen if imagen else (('img/' + img_files[int(pid)-1]) if pid.isdigit() and int(pid)-1 < len(img_files) else ''),
             "quantity": qty,
             "line_total": f"${line_total:,.0f}"
         })
@@ -257,7 +602,8 @@ def api_register():
     name = data.get("name", "").strip()
     email = data.get("email", "").strip().lower()
     password = data.get("password", "")
-    role = data.get("role", "user")
+    # Always force role to 'user' for self-registration to prevent users creating admin accounts
+    role = 'user'
     if not name or not email or not password:
         return jsonify({"ok": False, "error": "Todos los campos son obligatorios."}), 400
     # Try to save to MySQL if configured
@@ -271,7 +617,18 @@ def api_register():
     # Always require MySQL: try to get a connection (env vars or sensible defaults)
     conn = get_mysql_conn()
     if not conn:
-        return jsonify({"ok": False, "error": "No se pudo conectar a la base de datos MySQL. Revisa MYSQL_HOST/USER/PASSWORD/DB o la configuración local."}), 500
+        # attempt to get debug info
+        dbg_conn, err_msg, used = try_mysql_connect_debug()
+        if dbg_conn:
+            try:
+                dbg_conn.close()
+            except Exception:
+                pass
+            # weird: get_mysql_conn returned None but debug succeeded; still fail-safe message
+            return jsonify({"ok": False, "error": "Conexión fallida (inconsistente). Intenta de nuevo."}), 500
+        else:
+            human = f"No se pudo conectar a MySQL. Último error: {err_msg}. Intentados: {used}"
+            return jsonify({"ok": False, "error": human}), 500
 
     try:
         with conn.cursor() as cur:
@@ -281,10 +638,74 @@ def api_register():
             if exists and exists.get('c', 0) > 0:
                 conn.close()
                 return jsonify({"ok": False, "error": "Este correo ya está registrado."}), 400
+            # Inspect columns to optionally include creado_en timestamp
+            try:
+                cur.execute(f"SHOW COLUMNS FROM {table}")
+                cols = cur.fetchall()
+                col_names = set()
+                for r in cols:
+                    if isinstance(r, (list, tuple)) and len(r) > 0:
+                        col_names.add(str(r[0]).lower())
+                    elif isinstance(r, dict) and 'Field' in r:
+                        col_names.add(str(r['Field']).lower())
+            except Exception:
+                col_names = set()
+
+            now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            # Prepare insert columns and values, optionally including creado_en and handling missing AUTO_INCREMENT id
+            insert_cols = []
+            insert_vals = []
+            # include id if table has id but it's not AUTO_INCREMENT (compute next id)
+            try:
+                include_id = False
+                if 'id' in col_names:
+                    try:
+                        cur.execute(f"SHOW COLUMNS FROM {table} WHERE Field='id'")
+                        id_row = cur.fetchone()
+                        extra = None
+                        if isinstance(id_row, dict) and 'Extra' in id_row:
+                            extra = id_row.get('Extra')
+                        elif isinstance(id_row, (list, tuple)) and len(id_row) >= 6:
+                            extra = id_row[5]
+                        if not (extra and 'auto_increment' in str(extra).lower()):
+                            include_id = True
+                    except Exception:
+                        include_id = False
+                if include_id:
+                    cur.execute(f"SELECT COALESCE(MAX(id),0)+1 FROM {table}")
+                    nextid_row = cur.fetchone()
+                    nextid = None
+                    if isinstance(nextid_row, dict):
+                        vals = list(nextid_row.values())
+                        nextid = vals[0] if vals else None
+                    elif isinstance(nextid_row, (list, tuple)):
+                        nextid = nextid_row[0]
+                    if nextid is None:
+                        include_id = False
+                    else:
+                        insert_cols.append('id')
+                        insert_vals.append(int(nextid))
+            except Exception:
+                include_id = False
+
+            # Common fields
+            insert_cols.extend(['nombre', 'email', 'password'])
+            insert_vals.extend([name, email, hashed])
             if table == 'usuarios':
-                cur.execute(f"INSERT INTO {table} (nombre,email,password,rol) VALUES (%s,%s,%s,%s)", (name, email, hashed, role))
-            else:
-                cur.execute(f"INSERT INTO {table} (nombre,email,password) VALUES (%s,%s,%s)", (name, email, hashed))
+                # include role column if present (some schemas use 'rol')
+                if 'rol' in col_names:
+                    insert_cols.append('rol'); insert_vals.append(role)
+                elif 'role' in col_names:
+                    insert_cols.append('role'); insert_vals.append(role)
+            # creado_en if exists
+            if 'creado_en' in col_names:
+                insert_cols.append('creado_en'); insert_vals.append(now)
+
+            # Build SQL
+            placeholders = ','.join(['%s'] * len(insert_vals))
+            cols_sql = ','.join(insert_cols)
+            sql = f"INSERT INTO {table} ({cols_sql}) VALUES ({placeholders})"
+            cur.execute(sql, tuple(insert_vals))
             conn.commit()
         conn.close()
         session["user"] = {"name": name, "email": email, "role": role}
@@ -307,6 +728,17 @@ def api_login():
 
     # Try MySQL using the shared helper (this supports env vars or local fallback)
     conn = get_mysql_conn()
+    if not conn:
+        # return debug info to frontend so the UI shows why DB isn't reachable
+        dbg_conn, err_msg, used = try_mysql_connect_debug()
+        if dbg_conn:
+            try:
+                dbg_conn.close()
+            except Exception:
+                pass
+            return jsonify({"ok": False, "error": "Conexión inconsistente: get_mysql_conn falló pero debug succedió"}), 500
+        else:
+            return jsonify({"ok": False, "error": "No se pudo conectar a la base de datos MySQL.", "detail": err_msg, "attempted": used}), 500
     if conn:
         try:
             with conn.cursor() as cur:
@@ -315,6 +747,7 @@ def api_login():
                 row = cur.fetchone()
                 if row:
                     stored = row.get('password') or ''
+                    print(f"[auth] admin lookup stored startswith: {stored[:40]}...")
                     # scrypt via passlib if available
                     if stored.startswith('scrypt:') and passlib_scrypt is not None:
                         try:
@@ -325,6 +758,13 @@ def api_login():
                                 return jsonify({"ok": True, "user": session["user"], "redirect": "/admin"})
                         except Exception:
                             pass
+                    # If the stored hash is scrypt but passlib is not installed, return a clear error
+                    if stored.startswith('scrypt:') and passlib_scrypt is None:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        return jsonify({"ok": False, "error": "Server missing 'passlib' library required to verify scrypt hashed passwords. Run: pip install passlib"}), 500
                     # Werkzeug-style pbkdf2
                     if stored.startswith('pbkdf2:') or (stored and len(stored) > 40):
                         if check_password_hash(stored, password):
@@ -347,6 +787,7 @@ def api_login():
                 urow = cur.fetchone()
                 if urow:
                     stored = urow.get('password') or ''
+                    print(f"[auth] user lookup stored startswith: {stored[:40]}...")
                     if stored.startswith('scrypt:') and passlib_scrypt is not None:
                         try:
                             if passlib_scrypt.verify(password, stored):
@@ -356,6 +797,12 @@ def api_login():
                                 return jsonify({"ok": True, "user": session["user"], "redirect": False})
                         except Exception:
                             pass
+                    if stored.startswith('scrypt:') and passlib_scrypt is None:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        return jsonify({"ok": False, "error": "Server missing 'passlib' library required to verify scrypt hashed passwords. Run: pip install passlib"}), 500
                     if stored.startswith('pbkdf2:') or (stored and len(stored) > 40):
                         if check_password_hash(stored, password):
                             session["user"] = {"name": urow.get('nombre'), "email": urow.get('email'), "role": urow.get('rol') or 'user'}
@@ -525,6 +972,57 @@ def api_admin_products():
     return jsonify(rows)
 
 
+@app.route('/api/admin/orders')
+def api_admin_orders():
+    user = session.get('user')
+    if not user or user.get('role') != 'admin':
+        return jsonify({'error': 'forbidden'}), 403
+    try:
+        conn = get_metrics_conn()
+        cur = conn.cursor()
+        cur.execute('SELECT id, user_email, payment_method, amount, items, reference, phone, address, card_last4, status, created_at FROM orders ORDER BY created_at DESC')
+        rows = cur.fetchall()
+        out = []
+        for r in rows:
+            out.append({
+                'id': r[0], 'user_email': r[1], 'payment_method': r[2], 'amount': r[3], 'items': r[4], 'reference': r[5], 'phone': r[6], 'address': r[7], 'card_last4': r[8], 'status': r[9], 'created_at': r[10]
+            })
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'error': 'failed', 'detail': str(e)}), 500
+
+
+@app.route('/api/admin/orders/<int:oid>/mark_paid', methods=['POST'])
+def api_admin_orders_mark_paid(oid):
+    user = session.get('user')
+    if not user or user.get('role') != 'admin':
+        return jsonify({'error': 'forbidden'}), 403
+    try:
+        conn = get_metrics_conn()
+        cur = conn.cursor()
+        cur.execute('UPDATE orders SET status=? WHERE id=?', ('paid', oid))
+        conn.commit()
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': 'failed', 'detail': str(e)}), 500
+
+
 @app.route('/api/admin/sync_products', methods=['POST'])
 def api_admin_sync_products():
     """Insert generated site products into the DB table 'producto' (or 'productos') if they don't exist yet.
@@ -665,6 +1163,18 @@ def api_logout():
 def api_session():
     return jsonify({"ok": True, "user": session.get("user")})
 
+
+@app.get('/api/debug/db')
+def api_debug_db():
+    conn, err, used = try_mysql_connect_debug()
+    if conn:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return jsonify({'ok': True, 'message': 'Conexión a MySQL establecida', 'used': used})
+    return jsonify({'ok': False, 'error': err, 'attempted': used}), 500
+
 # --- Products API (optional) ---
 @app.get("/api/products")
 def api_products():
@@ -708,6 +1218,46 @@ def api_products():
     }, generate_products())))
 
 
+@app.get('/api/products/<int:pid>')
+def api_product_get(pid):
+    """Return a single product by id from DB or generated list."""
+    conn = get_mysql_conn()
+    if conn:
+        cur = conn.cursor(pymysql.cursors.DictCursor)
+        tried = ['producto', 'productos', 'productos_catalogo', 'items']
+        row = None
+        for t in tried:
+            try:
+                cur.execute(f"SELECT * FROM {t} WHERE id=%s LIMIT 1", (pid,))
+                rows = cur.fetchall()
+                if rows:
+                    row = rows[0]
+                    break
+            except Exception:
+                row = None
+        cur.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
+        if row:
+            return jsonify({
+                'id': row.get('id'),
+                'nombre': row.get('nombre') or row.get('name'),
+                'descripcion': row.get('descripcion') or row.get('description') or '',
+                'precio': row.get('precio'),
+                'imagen': row.get('imagen') or row.get('image') or '',
+                'categoria': row.get('categoria') or row.get('category') or '',
+                'stock': row.get('stock') if 'stock' in row else None
+            })
+
+    # fallback to generated products
+    for p in generate_products():
+        if p.get('id') == pid:
+            return jsonify({'id': p.get('id'), 'nombre': p.get('nombre'), 'descripcion': p.get('descripcion'), 'precio': p.get('precio_val'), 'imagen': p.get('imagen'), 'categoria': p.get('categoria')})
+    return jsonify({'error': 'not found'}), 404
+
+
 
 @app.post('/api/products')
 def api_products_create():
@@ -736,12 +1286,31 @@ def api_products_create():
         except Exception:
             target = None
     if not target:
-        cur.close()
+        # Try to create a compatible 'productos' table automatically to accept inserts
         try:
-            conn.close()
-        except Exception:
-            pass
-        return jsonify({'error': 'no product table found'}), 500
+            create_sql = '''
+            CREATE TABLE IF NOT EXISTS productos (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                nombre VARCHAR(255),
+                descripcion TEXT,
+                precio DECIMAL(12,2),
+                imagen VARCHAR(512),
+                categoria VARCHAR(128),
+                stock INT DEFAULT 0,
+                creado_en DATETIME,
+                actualizado_en DATETIME
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            '''
+            cur.execute(create_sql)
+            conn.commit()
+            target = 'productos'
+        except Exception as e:
+            cur.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return jsonify({'error': 'no product table found and create failed', 'detail': str(e)}), 500
     # Inspect target table columns and build a safe INSERT with existing columns only
     try:
         cur.execute(f"SHOW COLUMNS FROM {target}")
@@ -776,6 +1345,51 @@ def api_products_create():
     if 'actualizado_en' in existing_cols:
         fields.append('actualizado_en'); values.append(now)
 
+    # If the table has an 'id' column but it is not AUTO_INCREMENT, compute next id and include it
+    try:
+        id_auto = False
+        if 'id' in existing_cols:
+            try:
+                cur.execute(f"SHOW COLUMNS FROM {target} WHERE Field='id'")
+                id_row = cur.fetchone()
+                if id_row:
+                    # id_row may be tuple or dict; find the 'Extra' field
+                    extra = None
+                    if isinstance(id_row, dict) and 'Extra' in id_row:
+                        extra = id_row.get('Extra')
+                    elif isinstance(id_row, (list, tuple)) and len(id_row) >= 6:
+                        extra = id_row[5]
+                    if extra and 'auto_increment' in str(extra).lower():
+                        id_auto = True
+            except Exception:
+                id_auto = False
+        if 'id' in existing_cols and not id_auto:
+            # compute next id
+            try:
+                cur.execute(f"SELECT COALESCE(MAX(id),0)+1 FROM {target}")
+                nextid_row = cur.fetchone()
+                nextid = None
+                if isinstance(nextid_row, dict):
+                    # dict cursor may return value by key; take first value
+                    vals = list(nextid_row.values())
+                    nextid = vals[0] if vals else None
+                elif isinstance(nextid_row, (list, tuple)):
+                    nextid = nextid_row[0]
+                if nextid is None:
+                    raise Exception('could not compute next id')
+                # Prepend id to fields/values so INSERT includes it
+                fields.insert(0, 'id')
+                values.insert(0, int(nextid))
+            except Exception as e:
+                cur.close()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                return jsonify({'error': 'could not compute next id', 'detail': str(e)}), 500
+    except Exception:
+        pass
+
     if not fields:
         cur.close(); conn.close()
         return jsonify({'error': 'target table has no compatible columns'}), 500
@@ -790,11 +1404,22 @@ def api_products_create():
             pass
         inserted_id = cur.lastrowid
     except Exception as e:
+        # Log detailed DB error for debugging
+        try:
+            tb = traceback.format_exc()
+            log_path = os.path.join(os.path.dirname(__file__), 'db_errors.log')
+            with open(log_path, 'a', encoding='utf-8') as fh:
+                fh.write(f"--- INSERT ERROR {datetime.utcnow().isoformat()} ---\n")
+                fh.write(f"SQL: {sql}\n")
+                fh.write(f"PARAMS: {repr(tuple(values))}\n")
+                fh.write(tb + "\n")
+        except Exception:
+            pass
         try:
             conn.close()
         except Exception:
             pass
-        return jsonify({'error': 'insert failed', 'detail': str(e)}), 500
+        return jsonify({'error': 'insert failed', 'detail': str(e), 'sql': sql, 'params': tuple(values)}), 500
     cur.close()
     try:
         conn.close()
@@ -837,29 +1462,65 @@ def api_products_update(pid):
     fields = []
     params = []
     if nombre is not None:
-        fields.append('nombre=%s'); params.append(nombre)
+        # Will map to actual column name below after inspecting table
+        params_map = {'nombre': nombre}
+    else:
+        params_map = {}
     if descripcion is not None:
-        fields.append('descripcion=%s'); params.append(descripcion)
+        params_map['descripcion'] = descripcion
     if precio is not None:
-        fields.append('precio=%s'); params.append(precio)
+        params_map['precio'] = precio
     if imagen is not None:
-        fields.append('imagen=%s'); params.append(imagen)
+        params_map['imagen'] = imagen
     if categoria is not None:
-        fields.append('categoria=%s'); params.append(categoria)
+        params_map['categoria'] = categoria
     if stock is not None:
-        fields.append('stock=%s'); params.append(int(stock))
+        params_map['stock'] = int(stock)
+    # Inspect table columns to map to existing names (support 'name','description','price','image','category')
+    try:
+        cur.execute(f"SHOW COLUMNS FROM {target}")
+        cols = cur.fetchall()
+        existing_cols = set()
+        for row in cols:
+            if isinstance(row, (list, tuple)) and len(row) > 0:
+                existing_cols.add(str(row[0]).lower())
+            elif isinstance(row, dict) and 'Field' in row:
+                existing_cols.add(str(row['Field']).lower())
+    except Exception:
+        existing_cols = set()
+
+    for logical, val in params_map.items():
+        # prefer spanish column names, else english equivalents
+        if logical in existing_cols:
+            fields.append(f"{logical}=%s"); params.append(val)
+        else:
+            alt = {'nombre':'name','descripcion':'description','precio':'price','imagen':'image','categoria':'category'}.get(logical)
+            if alt and alt in existing_cols:
+                fields.append(f"{alt}=%s"); params.append(val)
     if not fields:
         cur.close(); conn.close(); return jsonify({'ok': True})
     params.append(pid)
     try:
-        cur.execute(f"UPDATE {target} SET " + ",".join(fields) + " WHERE id=%s", tuple(params))
+        sql = f"UPDATE {target} SET " + ",".join(fields) + " WHERE id=%s"
+        cur.execute(sql, tuple(params))
         conn.commit()
     except Exception as e:
+        # Log detailed DB error for debugging
+        try:
+            tb = traceback.format_exc()
+            log_path = os.path.join(os.path.dirname(__file__), 'db_errors.log')
+            with open(log_path, 'a', encoding='utf-8') as fh:
+                fh.write(f"--- UPDATE ERROR {datetime.utcnow().isoformat()} ---\n")
+                fh.write(f"SQL: {sql}\n")
+                fh.write(f"PARAMS: {repr(tuple(params))}\n")
+                fh.write(tb + "\n")
+        except Exception:
+            pass
         try:
             conn.close()
         except Exception:
             pass
-        return jsonify({'error': 'update failed', 'detail': str(e)}), 500
+        return jsonify({'error': 'update failed', 'detail': str(e), 'sql': sql, 'params': tuple(params)}), 500
     cur.close()
     try:
         conn.close()
@@ -964,12 +1625,116 @@ def api_cart_remove():
 
 @app.post("/api/checkout")
 def api_checkout():
+    # Require authenticated user for checkout
+    user = session.get('user')
+    if not user:
+        return jsonify({'ok': False, 'error': 'Autenticación requerida. Inicia sesión para continuar.'}), 401
+
     cart = get_cart()
     if not cart:
         return jsonify({"ok": False, "error": "Tu carrito está vacío."}), 400
-    # Simulate checkout
-    session["cart"] = {}
-    return jsonify({"ok": True, "message": "¡Gracias por tu compra! Este es un sitio de demostración."})
+
+    data = request.get_json(silent=True) or {}
+    payment_method = (data.get('payment_method') or data.get('method') or '').lower()
+    phone = data.get('phone') or data.get('telefono')
+    address = data.get('address') or data.get('direccion')
+    card_number = data.get('card_number')
+    if not payment_method:
+        # For the demo, require the frontend to pass a chosen method
+        return jsonify({'ok': False, 'error': 'Seleccione un método de pago.'}), 400
+
+    allowed = ['card', 'paypal', 'nequi', 'efecty']
+    if payment_method not in allowed:
+        return jsonify({'ok': False, 'error': f'Método de pago no soportado: {payment_method}'}), 400
+
+    # Build order info
+    total_amount = 0
+    items_str = []
+    for pid, qty in cart.items():
+        # Attempt to get price via cart_summary logic
+        try:
+            pr = cart_summary({pid: qty})
+            if pr and pr.get('items'):
+                price_str = pr['items'][0].get('price','')
+                # strip formatting e.g. $28,000
+                num = int(''.join(ch for ch in price_str if ch.isdigit())) if price_str else 0
+            else:
+                num = 0
+        except Exception:
+            num = 0
+        total_amount += num * qty
+        items_str.append(f"{pid}:{qty}")
+
+    # generate a reference
+    ref = f"ORDER-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{random.randint(1000,9999)}"
+
+    # create orders table if missing
+    try:
+        init_orders_table()
+    except Exception:
+        pass
+
+    # determine card_last4 if provided (do NOT store full card)
+    card_last4 = None
+    if card_number:
+        try:
+            s = str(card_number).strip()
+            card_last4 = s[-4:]
+        except Exception:
+            card_last4 = None
+
+    order_id = create_order_in_db(user.get('email'), payment_method, total_amount, ','.join(items_str), ref, phone=phone, address=address, card_last4=card_last4)
+
+    # Record visit metric
+    try:
+        record_visit(user.get('email'), user.get('role'), 'checkout', ','.join(cart.keys()))
+    except Exception:
+        pass
+
+    # Offline methods: return instructions / QR and leave order pending
+    offline = ['nequi', 'efecty', 'bancolombia', 'transfiya']
+    if payment_method in offline:
+        instructions = {}
+        if payment_method == 'nequi':
+            # create a payload for a QR (this is a simple text payload; real provider requires specific format)
+            payload = f"NEQUI|REF:{ref}|AMT:{total_amount}"
+            qr = generate_qr_base64(payload)
+            instructions['qr'] = qr
+            instructions['text'] = f"Abre Nequi, escanea el QR o envía a cuenta 3001234567 con referencia {ref} por ${total_amount}."
+        elif payment_method in ('efecty', 'bancolombia', 'transfiya'):
+            instructions['text'] = f"Dirígete al punto {payment_method.upper()} y paga la referencia {ref} por ${total_amount}. Guarda el recibo y notifica al vendedor." 
+        # notify admin by email
+        try:
+            subj = f"Nuevo pedido (ref {ref}) - {payment_method} - {total_amount}"
+            body = f"Nuevo pedido\nReferencia: {ref}\nUsuario: {user.get('email')}\nMetodo: {payment_method}\nMonto: {total_amount}\nItems: {','.join(items_str)}\n\nInstrucciones:\n{instructions.get('text','')}\n"
+            send_email(subj, body)
+        except Exception:
+            pass
+        return jsonify({'ok': True, 'order_id': order_id, 'reference': ref, 'amount': total_amount, 'instructions': instructions})
+
+    # Instant methods: simulate payment and clear cart
+    try:
+        # For demo, accept card/paypal immediately; if card, we simulated and saved last4 already
+        session['cart'] = {}
+        # mark order as paid in sqlite
+        try:
+            conn = get_metrics_conn()
+            cur = conn.cursor()
+            cur.execute('UPDATE orders SET status=? WHERE id=?', ('paid', order_id))
+            conn.commit()
+            try:
+                cur.close()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return jsonify({'ok': True, 'message': f'Pago registrado con método: {payment_method}. Gracias por tu compra.', 'order_id': order_id})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Error procesando el pago', 'detail': str(e)}), 500
 
 
 if __name__ == "__main__":

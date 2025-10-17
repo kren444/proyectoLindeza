@@ -389,23 +389,184 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Checkout Logic ---
     const checkoutBtn = document.querySelector('.btn-checkout');
-    checkoutBtn.addEventListener('click', async () => {
-        try {
-            // Verificar sesión antes de checkout
-            const session = await api('/api/session');
-            if (!session.user) {
-                alert('Debes iniciar sesión para finalizar la compra.');
-                openModal(); // Mostrar modal de login
-                return;
-            }
-            const res = await api('/api/checkout', { method: 'POST', body: JSON.stringify({}) });
-            alert(res.message || '¡Gracias por tu compra!');
-            await refreshCart();
-            closeCart();
-        } catch (err) {
-            alert(err.message);
+    // Create a payment modal (select payment method)
+    const paymentModal = document.createElement('div');
+    paymentModal.className = 'modal-overlay hidden';
+    paymentModal.innerHTML = `
+        <div class="modal-content" style="max-width:520px;">
+            <button class="close-modal">&times;</button>
+            <h2>Datos de envío y método de pago</h2>
+            <div style="margin:12px 0;">
+                <label style="display:block;margin-bottom:8px;">Teléfono / Celular:<br><input type="text" id="pay-phone" style="width:100%;padding:8px;margin-top:6px;"></label>
+                <label style="display:block;margin-bottom:8px;">Dirección de envío:<br><input type="text" id="pay-address" style="width:100%;padding:8px;margin-top:6px;"></label>
+            </div>
+            <h3 style="margin-top:6px;">Selecciona método de pago</h3>
+            <div style="margin:12px 0;">
+                <label style="display:block;margin-bottom:8px;"><input type="radio" name="pay" value="card" checked> Tarjeta de crédito / débito</label>
+                <label style="display:block;margin-bottom:8px;"><input type="radio" name="pay" value="paypal"> PayPal</label>
+                <label style="display:block;margin-bottom:8px;"><input type="radio" name="pay" value="nequi"> Nequi (App / Código)</label>
+                <label style="display:block;margin-bottom:8px;"><input type="radio" name="pay" value="efecty"> Efecty (pago en punto físico)</label>
+                <label style="display:block;margin-bottom:8px;"><input type="radio" name="pay" value="bancolombia"> Transferencia Bancolombia</label>
+                <label style="display:block;margin-bottom:8px;"><input type="radio" name="pay" value="transfiya"> Transferencia Transfiya</label>
+            </div>
+            <div id="card-fields" style="margin-top:8px;">
+                <h4>Datos de tarjeta</h4>
+                <input type="text" id="card-number" placeholder="Número de tarjeta" style="width:100%;padding:8px;margin:6px 0;">
+                <div style="display:flex;gap:8px;"><input type="text" id="card-exp" placeholder="MM/AA" style="flex:1;padding:8px;"><input type="text" id="card-cvc" placeholder="CVC" style="width:120px;padding:8px;"></div>
+            </div>
+            <div style="margin-top:16px;text-align:right;">
+                <button class="btn btn-secondary cancel-payment">Cancelar</button>
+                <button class="btn btn-primary confirm-payment">Pagar ahora</button>
+            </div>
+            <p id="payment-error" class="error-message hidden" style="margin-top:12px;"></p>
+        </div>
+    `;
+    document.body.appendChild(paymentModal);
+
+    // Track pending checkout after login
+    let pendingCheckout = false;
+
+    function showPaymentModal() {
+        document.getElementById('payment-error').classList.add('hidden');
+        paymentModal.classList.remove('hidden');
+    }
+    function hidePaymentModal() { paymentModal.classList.add('hidden'); }
+
+    paymentModal.addEventListener('click', (e) => {
+        if (e.target === paymentModal || e.target.classList.contains('close-modal') || e.target.classList.contains('cancel-payment')) {
+            hidePaymentModal();
         }
     });
+
+    // After successful login via existing login form handler, show payment modal if pending
+    const originalUpdateUIForUser = updateUIForUser;
+    // Replace the local function so all local calls (login/register) run the wrapper
+    updateUIForUser = function(user) {
+        originalUpdateUIForUser(user);
+        if (user && pendingCheckout) {
+            pendingCheckout = false;
+            showPaymentModal();
+        }
+    };
+
+    checkoutBtn.addEventListener('click', async () => {
+        try {
+            const session = await api('/api/session');
+            if (!session.user) {
+                // Ask user to login first, then continue to payment
+                pendingCheckout = true;
+                openModal();
+                return;
+            }
+            // Already logged in -> show payment selection
+            showPaymentModal();
+        } catch (err) {
+            alert('Error comprobando sesión: ' + (err.message || err));
+        }
+    });
+
+    // Confirm payment button -> call /api/checkout with chosen method
+    // show/hide card fields depending on selected method
+    paymentModal.addEventListener('change', (e) => {
+        const chosen = paymentModal.querySelector('input[name="pay"]:checked')?.value || 'card';
+        const cardFields = document.getElementById('card-fields');
+        if (chosen === 'card') cardFields.style.display = 'block'; else cardFields.style.display = 'none';
+    });
+
+    paymentModal.querySelector('.confirm-payment').addEventListener('click', async () => {
+        const chosen = paymentModal.querySelector('input[name="pay"]:checked')?.value || 'card';
+        const paymentError = document.getElementById('payment-error');
+        const phone = document.getElementById('pay-phone')?.value || '';
+        const address = document.getElementById('pay-address')?.value || '';
+        const cardNumber = document.getElementById('card-number')?.value || '';
+        try {
+            const body = { payment_method: chosen, phone: phone, address: address };
+            if (chosen === 'card') {
+                // basic validation
+                if (!cardNumber || cardNumber.length < 12) throw new Error('Ingrese un número de tarjeta válido');
+                body.card_number = cardNumber;
+            }
+            const res = await api('/api/checkout', { method: 'POST', body: JSON.stringify(body) });
+            // If offline method, server returns instructions with QR or text
+            if (res.instructions) {
+                hidePaymentModal();
+                showPaymentResult(res);
+            } else {
+                alert(res.message || 'Pago procesado. ¡Gracias!');
+                hidePaymentModal();
+                await refreshCart();
+                closeCart();
+            }
+        } catch (err) {
+            paymentError.textContent = err.message || 'Error procesando el pago';
+            paymentError.classList.remove('hidden');
+        }
+    });
+
+    // Payment result modal
+    const paymentResultModal = document.createElement('div');
+    paymentResultModal.className = 'modal-overlay hidden';
+    paymentResultModal.innerHTML = `
+        <div class="modal-content" style="max-width:560px;">
+            <button class="close-modal">&times;</button>
+            <div id="payment-result-body"></div>
+            <div style="margin-top:12px;">
+                <label style="display:block;font-weight:600;margin-bottom:6px;">Adjuntar comprobante (imagen o PDF):</label>
+                <input type="file" id="proof-file" accept="image/*,.pdf" style="display:block;margin-bottom:8px;">
+                <button id="upload-proof-btn" class="btn" style="margin-right:8px;">Subir comprobante</button>
+                <span id="upload-status" style="margin-left:8px;color:#333"></span>
+            </div>
+            <div style="text-align:right;margin-top:12px;"><button class="btn btn-primary close-result">Cerrar</button></div>
+        </div>
+    `;
+    document.body.appendChild(paymentResultModal);
+    const paymentResultBody = paymentResultModal.querySelector('#payment-result-body');
+    paymentResultModal.addEventListener('click', (e) => {
+        if (e.target === paymentResultModal || e.target.classList.contains('close-modal') || e.target.classList.contains('close-result')) {
+            paymentResultModal.classList.add('hidden');
+        }
+    });
+
+    function showPaymentResult(res) {
+        // res.instructions may contain .qr (data URI) and .text
+        const inst = res.instructions || {};
+        let html = `<h3>Instrucciones de pago</h3>`;
+        if (inst.qr) {
+            html += `<p>Escanea este código con la app correspondiente (Nequi) o guarda la imagen:</p>`;
+            html += `<img src="${inst.qr}" alt="QR de pago" style="max-width:320px;display:block;margin:0 auto 12px;">`;
+        }
+        if (inst.text) html += `<p style="white-space:pre-wrap">${inst.text}</p>`;
+        if (res.reference) html += `<p><strong>Referencia:</strong> ${res.reference}</p>`;
+        if (res.amount) html += `<p><strong>Monto:</strong> ${res.amount}</p>`;
+        paymentResultBody.innerHTML = html;
+        paymentResultModal.classList.remove('hidden');
+        // wire upload button
+        const uploadBtn = document.getElementById('upload-proof-btn');
+        const fileInput = document.getElementById('proof-file');
+        const statusSpan = document.getElementById('upload-status');
+        if (uploadBtn) {
+            uploadBtn.addEventListener('click', async () => {
+                const f = fileInput.files[0];
+                if (!f) { statusSpan.textContent = 'Seleccione un archivo primero.'; return; }
+                statusSpan.textContent = 'Subiendo...';
+                const form = new FormData();
+                form.append('file', f);
+                try {
+                    const resp = await fetch(`/api/orders/${res.order_id}/upload_proof`, { method: 'POST', credentials: 'same-origin', body: form });
+                    const data = await resp.json();
+                    if (!resp.ok) throw new Error(data.error || 'upload failed');
+                    statusSpan.textContent = 'Comprobante subido.';
+                    // show link or image
+                    if (data.url) {
+                        const link = document.createElement('a'); link.href = data.url; link.textContent = 'Ver comprobante'; link.target = '_blank';
+                        statusSpan.innerHTML = ''; statusSpan.appendChild(link);
+                    }
+                } catch (err) {
+                    statusSpan.textContent = 'Error: ' + (err.message || err);
+                }
+            });
+        }
+    }
 
     // Initial cart state
     refreshCart().catch(()=>{});

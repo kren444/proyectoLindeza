@@ -301,6 +301,12 @@ h2 { font-size: 2rem; text-align: center; margin-bottom: 2rem;}
 #user-info span {
     font-size: 0.9rem;
     font-weight: 600;
+    /* Ensure welcome message is visible on light headers */
+    color: #000 !important;
+}
+/* Specific ID for the welcome message (fallback) */
+#welcome-msg {
+    color: #000 !important;
 }
 #user-info a {
     font-size: 0.9rem;

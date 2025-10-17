@@ -1,8 +1,16 @@
 // Simple admin JS: list/products and CRUD via REST
 async function api(path, opts = {}) {
     const res = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...opts });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || 'API error');
+    // try to parse json body, but fallback to text
+    let data = {};
+    try { data = await res.json(); } catch(e) { try { const txt = await res.text(); data = txt ? { text: txt } : {}; } catch(e2) { data = {}; } }
+    if (!res.ok) {
+        const message = (data && (data.error || data.detail || data.message)) || `${res.status} ${res.statusText}`;
+        const err = new Error(message);
+        err.status = res.status;
+        err.response = data;
+        throw err;
+    }
     return data;
 }
 
@@ -15,6 +23,86 @@ async function fetchStatsAndUsers() {
     const stats = await api('/api/admin/stats');
     const users = await api('/api/admin/users');
     return { stats, users };
+}
+
+async function listOrders() {
+    return await api('/api/admin/orders', { method: 'GET' });
+}
+
+function renderOrders(orders) {
+    const container = document.getElementById('orders-list');
+    if (!container) return;
+    if (!orders || orders.length === 0) { container.innerHTML = '<p>No hay pedidos</p>'; return; }
+    container.innerHTML = '';
+    orders.forEach(o => {
+        const div = document.createElement('div');
+        div.style = 'background:#fff;padding:12px;border-radius:8px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;gap:12px';
+        div.innerHTML = `
+            <div style="flex:1">
+                <div class="order-row-click" style="cursor:pointer"><strong>#${o.id}</strong> — ${o.user_email} — <em>${o.payment_method}</em></div>
+                <div style="color:#666;margin-top:6px">Referencia: ${o.reference} — Monto: ${o.amount} — Estado: <strong>${o.status}</strong></div>
+                <div style="margin-top:6px;color:#444">Tel: ${o.phone || '-'} — Dir: ${o.address || '-'}</div>
+                <div style="margin-top:6px;color:#333">Items: ${o.items || ''} ${o.card_last4 ? (' — Tarjeta: ****'+o.card_last4) : ''}</div>
+            </div>
+            <div style="width:160px;text-align:right">
+                <button class="btn btn-mark-paid" data-id="${o.id}" ${o.status==='paid'?'disabled':''}>Marcar pagado</button>
+            </div>
+        `;
+        container.appendChild(div);
+    });
+}
+
+// Admin: order detail modal
+function openOrderDetail(oid) {
+    (async ()=>{
+        try {
+            const data = await api('/api/admin/orders/' + oid);
+            // create modal
+            let modal = document.getElementById('order-detail-modal');
+            if (!modal) {
+                modal = document.createElement('div'); modal.id = 'order-detail-modal'; modal.className = 'modal-overlay';
+                modal.innerHTML = `<div class="modal-content"><button class="close-modal">&times;</button><div id="order-detail-body"></div></div>`;
+                document.body.appendChild(modal);
+                modal.addEventListener('click', (e)=>{ if (e.target===modal || e.target.classList.contains('close-modal')) modal.classList.add('hidden'); });
+            }
+            const body = modal.querySelector('#order-detail-body');
+            let html = `<h3>Pedido #${data.id}</h3>`;
+            html += `<p><strong>Usuario:</strong> ${data.user_email}</p>`;
+            html += `<p><strong>Método:</strong> ${data.payment_method}</p>`;
+            html += `<p><strong>Referencia:</strong> ${data.reference}</p>`;
+            html += `<p><strong>Monto:</strong> ${data.amount}</p>`;
+            html += `<p><strong>Tel:</strong> ${data.phone || '-'}</p>`;
+            html += `<p><strong>Dirección:</strong> ${data.address || '-'}</p>`;
+            html += `<p><strong>Items:</strong> ${data.items || ''}</p>`;
+            if (data.proof_path) html += `<p><strong>Comprobante:</strong> <a href="/uploads/${data.proof_path}" target="_blank">Ver</a></p>`;
+            html += `<div style="margin-top:8px;"><label>Adjuntar/Remplazar comprobante: <input type="file" id="admin-proof-file" accept="image/*,.pdf"></label> <button id="admin-upload-proof" class="btn">Subir</button></div>`;
+            html += `<div style="margin-top:8px;text-align:right"><button id="admin-mark-paid" class="btn">Marcar pagado</button></div>`;
+            body.innerHTML = html;
+            modal.classList.remove('hidden');
+            modal.querySelector('#admin-upload-proof').addEventListener('click', async ()=>{
+                const f = modal.querySelector('#admin-proof-file').files[0];
+                if (!f) { alert('Seleccione un archivo'); return; }
+                const form = new FormData(); form.append('file', f);
+                try {
+                    const res = await fetch(`/api/orders/${data.id}/upload_proof`, { method: 'POST', credentials: 'same-origin', body: form });
+                    const j = await res.json(); if (!res.ok) throw new Error(j.error||'upload failed');
+                    alert('Comprobante subido');
+                    openOrderDetail(oid); // refresh modal
+                } catch (err) { alert('Error: '+(err.message||err)); }
+            });
+            modal.querySelector('#admin-mark-paid').addEventListener('click', async ()=>{
+                if (!confirm('Marcar pedido #' + data.id + ' como pagado?')) return;
+                try {
+                    await api('/api/admin/orders/' + data.id + '/mark_paid', { method: 'POST' });
+                    alert('Pedido marcado como pagado');
+                    modal.classList.add('hidden');
+                    const orders = await listOrders(); renderOrders(orders);
+                } catch (err) { alert('Error: ' + err.message); }
+            });
+        } catch (err) {
+            alert('No se pudo cargar detalle del pedido: ' + err.message);
+        }
+    })();
 }
 
 function createRowForProduct(prod) {
@@ -96,13 +184,22 @@ function openProductModal(ctx) {
     modal.classList.remove('hidden');
     const title = document.getElementById('product-modal-title');
     const idField = document.getElementById('product-id');
-    document.getElementById('product-nombre').value = ctx?.nombre||ctx?.name||'';
-    document.getElementById('product-precio').value = ctx?.precio||ctx?.price||ctx?.precio||'';
-    document.getElementById('product-stock').value = ctx?.stock||'';
-    document.getElementById('product-imagen').value = ctx?.imagen||ctx?.image||'';
-    document.getElementById('product-categoria').value = ctx?.categoria||'';
-    document.getElementById('product-descripcion').value = ctx?.descripcion||ctx?.description||'';
-    idField.value = ctx?.id || '';
+    // Clear previous error
+    try { const errBox = document.getElementById('product-error'); if (errBox) { errBox.textContent = ''; errBox.style.display = 'none'; } } catch(e){}
+    // Set fields safely (check elements exist before setting value)
+    try {
+        const nombreEl = document.getElementById('product-nombre'); if (nombreEl) nombreEl.value = ctx?.nombre||ctx?.name||'';
+        const precioEl = document.getElementById('product-precio'); if (precioEl) precioEl.value = ctx?.precio||ctx?.price||ctx?.precio||'';
+        const stockEl = document.getElementById('product-stock'); if (stockEl) stockEl.value = ctx?.stock||'';
+        const imagenEl = document.getElementById('product-imagen'); if (imagenEl) imagenEl.value = ctx?.imagen||ctx?.image||'';
+        const categoriaEl = document.getElementById('product-categoria'); if (categoriaEl) categoriaEl.value = ctx?.categoria||'';
+        const descEl = document.getElementById('product-descripcion'); if (descEl) descEl.value = ctx?.descripcion||ctx?.description||'';
+        if (idField) idField.value = ctx?.id || '';
+    } catch (err) {
+        console.error('openProductModal failed to populate fields', err);
+        const errBox = document.getElementById('product-error');
+        if (errBox) { errBox.textContent = 'No se pudieron cargar los campos del producto. Revisa la consola.'; errBox.style.display = 'block'; }
+    }
     title.textContent = ctx ? 'Editar producto' : 'Nuevo producto';
 }
 function closeProductModal() { document.getElementById('product-modal').classList.add('hidden'); }
@@ -129,10 +226,12 @@ async function saveProductFromForm(e) {
         } else {
             res = await api('/api/products', { method: 'POST', body: JSON.stringify(body) });
         }
-        // success
-        console.log('Save response:', res);
-        closeProductModal();
-        await refreshProductsList();
+    // success
+    console.log('Save response:', res);
+    // clear any previous error
+    const errBox = document.getElementById('product-error'); if (errBox) { errBox.textContent = ''; errBox.style.display = 'none'; }
+    closeProductModal();
+    await refreshProductsList();
         // notify other tabs/pages that products changed so main page can reload
         try { localStorage.setItem('products_updated', Date.now()); } catch (e) {}
         // if user was not on admin page (rare), reload to show changes
@@ -142,8 +241,22 @@ async function saveProductFromForm(e) {
     } catch (err) {
         console.error('Save error:', err);
         const errBox = document.getElementById('product-error');
-        if (errBox) { errBox.textContent = 'Error al guardar producto: ' + err.message; errBox.style.display = 'block'; }
-        alert('Error al guardar producto: ' + err.message);
+        let msg = 'Error al guardar producto: ' + (err.message || String(err));
+        if (err.status) msg += ` (status: ${err.status})`;
+        if (err.response) {
+            try {
+                // prefer server-provided detail/sql/params
+                if (err.response.detail) msg += '\nDetalle: ' + err.response.detail;
+                if (err.response.sql) msg += '\nSQL: ' + err.response.sql;
+                if (err.response.params) msg += '\nPARAMS: ' + JSON.stringify(err.response.params);
+            } catch (e) {
+                msg += '\n' + JSON.stringify(err.response);
+            }
+        }
+        if (errBox) { errBox.textContent = msg; errBox.style.display = 'block'; }
+        console.error('Save response details:', err.response || null);
+        // keep alert as fallback
+        alert(msg);
     } finally {
         if (saveBtn) { saveBtn.disabled = false; if (originalText) saveBtn.textContent = originalText; }
     }
@@ -216,6 +329,11 @@ document.addEventListener('DOMContentLoaded', () => {
             }catch(e){ console.error('render visits chart', e); }
         }catch(err){ console.error('stats/users',err) }
         await refreshProductsList();
+        // load orders
+        try{
+            const orders = await listOrders();
+            renderOrders(orders);
+        }catch(e){ console.error('orders fetch', e); document.getElementById('orders-list').innerHTML = '<p>Error cargando pedidos</p>'; }
     })();
     document.getElementById('btn-add-product').addEventListener('click', () => openProductModal(null));
     const btnSync = document.getElementById('btn-sync-products');
@@ -254,11 +372,31 @@ document.addEventListener('DOMContentLoaded', () => {
         const edit = e.target.closest('.btn-edit');
         if (edit) {
             const id = edit.dataset.id;
-            // fetch product detail from API list
+            // fetch product detail from API to ensure latest fields (descripcion etc.)
             (async () => {
-                const list = await listProducts();
-                const prod = list.find(x => String(x.id) === String(id));
-                openProductModal(prod);
+                try {
+                    const prod = await api('/api/products/' + id, { method: 'GET' });
+                    openProductModal(prod);
+                } catch (err) {
+                    console.error('Failed to fetch product (single). Falling back to list fetch', err);
+                    // show server error in modal error box
+                    const errBox = document.getElementById('product-error');
+                    if (errBox) {
+                        let msg = 'No se pudo obtener detalles del producto: ' + (err.message || '');
+                        if (err.response) msg += '\n' + JSON.stringify(err.response);
+                        errBox.textContent = msg; errBox.style.display = 'block';
+                    }
+                    // fallback: try full list and find the product
+                    try {
+                        const list = await listProducts();
+                        const prod = list.find(x => String(x.id) === String(id));
+                        if (prod) openProductModal(prod);
+                        else alert('Producto no encontrado en la lista.');
+                    } catch (err2) {
+                        console.error('Failed to fetch product list fallback', err2);
+                        alert('No se pudo obtener detalles del producto. Revisa la consola.');
+                    }
+                }
             })();
             return;
         }
@@ -274,6 +412,35 @@ document.addEventListener('DOMContentLoaded', () => {
     if (btnViewProducts) btnViewProducts.addEventListener('click', async () => { window.scrollTo({top: document.getElementById('products-list').offsetTop - 100, behavior: 'smooth'}); });
     if (btnViewUsers) btnViewUsers.addEventListener('click', async () => { window.scrollTo({top: document.getElementById('users-list').offsetTop - 100, behavior: 'smooth'}); });
     if (btnViewOrders) btnViewOrders.addEventListener('click', async () => { alert('No hay pedidos implementados aún.'); });
+    // handle mark paid clicks inside orders list
+    document.getElementById('orders-list').addEventListener('click', async (e) => {
+        const btn = e.target.closest('.btn-mark-paid');
+        if (!btn) return;
+        const id = btn.dataset.id;
+        if (!confirm('Marcar pedido #' + id + ' como pagado?')) return;
+        try {
+            await api('/api/admin/orders/' + id + '/mark_paid', { method: 'POST' });
+            // refresh orders list
+            const orders = await listOrders(); renderOrders(orders);
+        } catch (err) { alert('Error marcando pagado: ' + err.message); }
+    });
+
+    // open detail when clicking row
+    document.getElementById('orders-list').addEventListener('click', (e) => {
+        const clickRow = e.target.closest('.order-row-click');
+        if (clickRow) {
+            const parent = clickRow.closest('[data-id]') || clickRow.closest('div');
+            // try to find id from nearby button
+            const btn = clickRow.closest('div').querySelector('.btn-mark-paid');
+            let id = btn ? btn.dataset.id : null;
+            // fallback: parse from text
+            if (!id) {
+                const m = clickRow.textContent.match(/#(\d+)/);
+                id = m ? m[1] : null;
+            }
+            if (id) openOrderDetail(id);
+        }
+    });
     // logout already wired on template but ensure it triggers API
     const logout = document.getElementById('logout-btn');
     if (logout) logout.addEventListener('click', async (e) => { e.preventDefault(); await api('/api/logout',{method:'POST'}); window.location.href = '/'; });

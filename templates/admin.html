@@ -35,7 +35,7 @@
         <div style="display:flex;justify-content:space-between;align-items:center">
           <div>
             <h1>Panel de Administrador</h1>
-            <div style="opacity:0.9">Bienvenido, {{ user.name }}</div>
+            <div style="opacity:0.9;color:#000">Bienvenido, {{ user.name }}</div>
           </div>
         </div>
       </header>
@@ -75,6 +75,12 @@
       <div class="users-section">
         <h2>Usuarios</h2>
         <div id="users-list">Cargando...</div>
+      </div>
+
+      <!-- Orders -->
+      <div class="users-section" style="margin-top:18px;">
+        <h2>Pedidos</h2>
+        <div id="orders-list">Cargando...</div>
       </div>
 
       <!-- Modal -->
