@@ -118,6 +118,7 @@ def init_orders_table():
                 phone TEXT,
                 address TEXT,
                 card_last4 TEXT,
+                mysql_id INTEGER,
                 status TEXT,
                 created_at DATETIME
             )
@@ -240,11 +241,89 @@ def api_admin_order_detail(oid):
 
 
 def create_order_in_db(user_email, payment_method, amount, items, reference, phone=None, address=None, card_last4=None):
+    # Try to insert into MySQL first (table 'pedidos'), but always persist in local SQLite as fallback/replica.
+    mysql_id = None
+    try:
+        mconn = get_mysql_conn()
+        if mconn:
+            try:
+                with mconn.cursor() as mcur:
+                    # Prepare insert; attempt directly. If table missing, create it and retry.
+                    insert_sql = ("INSERT INTO pedidos (user_email,payment_method,amount,items,reference,phone,address,card_last4,status,created_at) "
+                                  "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)")
+                    params = (user_email, payment_method, float(amount), items, reference, phone, address, card_last4, 'pending', datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'))
+                    try:
+                        mcur.execute(insert_sql, params)
+                        try:
+                            mconn.commit()
+                        except Exception:
+                            pass
+                        try:
+                            mysql_id = mcur.lastrowid
+                        except Exception:
+                            mysql_id = None
+                    except Exception:
+                        # Try to create a compatible 'pedidos' table and insert again
+                        try:
+                            create_sql = '''
+                            CREATE TABLE IF NOT EXISTS pedidos (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                user_email VARCHAR(255),
+                                payment_method VARCHAR(64),
+                                amount DECIMAL(12,2),
+                                items TEXT,
+                                reference VARCHAR(128),
+                                phone VARCHAR(64),
+                                address TEXT,
+                                card_last4 VARCHAR(8),
+                                status VARCHAR(32),
+                                created_at DATETIME
+                            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                            '''
+                            mcur.execute(create_sql)
+                            try:
+                                mconn.commit()
+                            except Exception:
+                                pass
+                            # retry insert
+                            mcur.execute(insert_sql, params)
+                            try:
+                                mconn.commit()
+                            except Exception:
+                                pass
+                            try:
+                                mysql_id = mcur.lastrowid
+                            except Exception:
+                                mysql_id = None
+                        except Exception:
+                            # give up on mysql insertion for now
+                            mysql_id = None
+            finally:
+                try:
+                    mconn.close()
+                except Exception:
+                    pass
+    except Exception:
+        mysql_id = None
+
+    # Always persist a local copy in SQLite. Ensure orders table has mysql_id column (older DBs may miss it).
     conn = get_metrics_conn()
     try:
         cur = conn.cursor()
-        cur.execute('INSERT INTO orders (user_email,payment_method,amount,items,reference,phone,address,card_last4,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
-                    (user_email, payment_method, amount, items, reference, phone, address, card_last4, 'pending', datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')))
+        # Ensure mysql_id column exists
+        try:
+            cur.execute('PRAGMA table_info(orders)')
+            cols = [r[1] for r in cur.fetchall()]
+            if 'mysql_id' not in cols:
+                try:
+                    cur.execute('ALTER TABLE orders ADD COLUMN mysql_id INTEGER')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        cur.execute('INSERT INTO orders (user_email,payment_method,amount,items,reference,phone,address,card_last4,mysql_id,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                    (user_email, payment_method, int(amount), items, reference, phone, address, card_last4, mysql_id, 'pending', datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')))
         conn.commit()
         oid = cur.lastrowid
         return oid
